@@ -34,10 +34,15 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.attention.ops.turboquant_kv_cache import is_turboquant_kv_cache
+from vllm.v1.attention.ops.turboquant_metadata import (
+    discover_turboquant_metadata_path,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
+    TurboQuantAttentionSpec,
 )
 
 if TYPE_CHECKING:
@@ -263,6 +268,24 @@ class Attention(nn.Module, AttentionLayerBase):
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
         self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
+        self._turboquant_layer_name = prefix
+        self._turboquant_model_name = (
+            None if model_config is None else getattr(model_config, "model", None)
+        )
+        self._turboquant_metadata_path = None
+
+        if is_turboquant_kv_cache(self.kv_cache_dtype):
+            metadata_path = None
+            if cache_config is not None:
+                metadata_path = discover_turboquant_metadata_path(
+                    self._turboquant_model_name,
+                    cache_config.turboquant_metadata_path,
+                )
+                extra_impl_args["turboquant_enabled"] = cache_config.enable_turboquant
+            self._turboquant_metadata_path = metadata_path
+            extra_impl_args["turboquant_layer_name"] = self._turboquant_layer_name
+            extra_impl_args["turboquant_model_name"] = self._turboquant_model_name
+            extra_impl_args["turboquant_metadata_path"] = metadata_path
 
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
@@ -526,6 +549,15 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window=self.sliding_window,
             )
         else:
+            if is_turboquant_kv_cache(self.kv_cache_dtype):
+                return TurboQuantAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                    head_size_v=self.head_size_v,
+                    dtype=self.kv_cache_torch_dtype,
+                    cache_dtype_str=self.kv_cache_dtype,
+                )
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,

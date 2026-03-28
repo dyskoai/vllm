@@ -53,6 +53,13 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
+void turboquant_paged_attention(
+    torch::Tensor& out, torch::Tensor& query, torch::Tensor& kv_cache,
+    int64_t num_kv_heads, double scale, torch::Tensor& block_tables,
+    torch::Tensor& seq_lens, int64_t block_size, int64_t max_seq_len,
+    torch::Tensor& rotation, torch::Tensor& qjl_state,
+    torch::Tensor& codebook);
+
 void merge_attn_states(torch::Tensor& output,
                        std::optional<torch::Tensor> output_lse,
                        const torch::Tensor& prefix_output,

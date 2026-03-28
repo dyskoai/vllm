@@ -12,8 +12,33 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.ops.turboquant_kv_cache import get_turboquant_packed_dim
 
 logger = init_logger(__name__)
+
+TURBOQUANT_VALUE_GROUP_SIZE = 64
+
+
+def turboquant_entry_size_bytes(
+    head_size: int,
+    value_group_size: int = TURBOQUANT_VALUE_GROUP_SIZE,
+) -> int:
+    if head_size % 8 != 0:
+        raise ValueError(
+            f"TurboQuant requires head_size to be a multiple of 8, got {head_size}."
+        )
+    if head_size % value_group_size != 0:
+        raise ValueError(
+            "TurboQuant requires head_size to be divisible by value_group_size. "
+            f"Got head_size={head_size}, value_group_size={value_group_size}."
+        )
+
+    k_lm_packed = head_size // 4
+    k_qjl_packed = head_size // 8
+    qjl_gamma = 2
+    v_packed = head_size // 4
+    v_scales = (head_size // value_group_size) * 2
+    return k_lm_packed + k_qjl_packed + qjl_gamma + v_packed + v_scales
 
 
 @dataclass(frozen=True)
@@ -184,6 +209,45 @@ class FullAttentionSpec(AttentionSpec):
             * self.num_kv_heads
             * (self.head_size + self.head_size_v)
             * get_dtype_size(self.dtype)
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurboQuantAttentionSpec(FullAttentionSpec):
+    value_group_size: int = TURBOQUANT_VALUE_GROUP_SIZE
+    cache_dtype_str: str = "turboquant_3_2"
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        packed_dim = get_turboquant_packed_dim(self.head_size, self.cache_dtype_str)
+        return 2 * self.block_size * self.num_kv_heads * packed_dim
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, TurboQuantAttentionSpec) for spec in specs), (
+            "All layers in the same KV cache group must be TurboQuantAttentionSpec."
+        )
+        value_group_sizes = {spec.value_group_size for spec in specs}
+        cache_dtype_strs = {spec.cache_dtype_str for spec in specs}
+        assert len(value_group_sizes) == 1, (
+            "All TurboQuant attention layers in the same KV cache group must "
+            "use the same value_group_size."
+        )
+        assert len(cache_dtype_strs) == 1, (
+            "All TurboQuant attention layers in the same KV cache group must "
+            "use the same cache_dtype_str."
+        )
+        return cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            head_size_v=specs[0].head_size_v,
+            dtype=specs[0].dtype,
+            page_size_padded=specs[0].page_size_padded,
+            sliding_window=specs[0].sliding_window,
+            attention_chunk_size=specs[0].attention_chunk_size,
+            value_group_size=value_group_sizes.pop(),
+            cache_dtype_str=cache_dtype_strs.pop(),
         )
 
 

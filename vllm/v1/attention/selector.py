@@ -10,12 +10,50 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
+from vllm.v1.attention.ops.turboquant_kv_cache import is_turboquant_kv_cache
 from vllm.v1.attention.backends.registry import (
     MAMBA_TYPE_TO_BACKEND_MAP,
     MambaAttentionBackendEnum,
 )
 
 logger = init_logger(__name__)
+
+
+def _validate_turboquant_selector_config(
+    attn_selector_config: "AttentionSelectorConfig",
+) -> None:
+    if not is_turboquant_kv_cache(attn_selector_config.kv_cache_dtype or ""):
+        return
+
+    from vllm.config import get_current_vllm_config
+    from vllm.platforms import current_platform
+
+    cache_config = get_current_vllm_config().cache_config
+    if cache_config is None or not cache_config.enable_turboquant:
+        raise ValueError(
+            "TurboQuant KV cache requires cache_config.enable_turboquant=True."
+        )
+    if not current_platform.is_cuda():
+        raise ValueError("TurboQuant backend requires CUDA.")
+    capability = current_platform.get_device_capability()
+    if capability is not None and capability.major < 9:
+        raise ValueError("TurboQuant backend requires H100-class CUDA devices.")
+    if attn_selector_config.attn_type != AttentionType.DECODER:
+        raise ValueError("TurboQuant backend only supports decoder attention.")
+    if attn_selector_config.head_size != 128:
+        raise ValueError("TurboQuant backend currently requires head_size=128.")
+    if attn_selector_config.block_size not in (None, 16):
+        raise ValueError("TurboQuant backend currently requires block_size=16.")
+    if attn_selector_config.use_mla:
+        raise ValueError("TurboQuant backend does not support MLA.")
+    if attn_selector_config.has_sink:
+        raise ValueError("TurboQuant backend does not support attention sinks.")
+    if attn_selector_config.use_sparse:
+        raise ValueError("TurboQuant backend does not support sparse attention.")
+    if attn_selector_config.use_mm_prefix:
+        raise ValueError(
+            "TurboQuant backend does not support partial multimodal prefixes."
+        )
 
 
 class AttentionSelectorConfig(NamedTuple):
@@ -88,6 +126,7 @@ def get_attn_backend(
         use_per_head_quant_scales=use_per_head_quant_scales,
         attn_type=attn_type or AttentionType.DECODER,
     )
+    _validate_turboquant_selector_config(attn_selector_config)
 
     return _cached_get_attn_backend(
         backend=vllm_config.attention_config.backend,

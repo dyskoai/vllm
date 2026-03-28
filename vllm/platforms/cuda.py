@@ -97,6 +97,14 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
+        if kv_cache_dtype == "turboquant_3_2":
+            return [
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.TURBOQUANT,
+                AttentionBackendEnum.FLEX_ATTENTION,
+            ]
         if device_capability.major == 10:
             return [
                 AttentionBackendEnum.FLASHINFER,

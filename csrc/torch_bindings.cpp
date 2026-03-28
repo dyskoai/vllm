@@ -63,6 +63,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
 
+  ops.def(
+      "turboquant_paged_attention("
+      "    Tensor! out, Tensor query, Tensor kv_cache,"
+      "    int num_kv_heads, float scale, Tensor block_tables,"
+      "    Tensor seq_lens, int block_size, int max_seq_len,"
+      "    Tensor rotation, Tensor qjl_state, Tensor codebook) -> ()");
+  ops.impl("turboquant_paged_attention", torch::kCUDA,
+           &turboquant_paged_attention);
+
   // Merge attn states
   // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
   // can be used to combine partial attention results (in the split-KV case)
@@ -699,6 +708,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        Tensor k_scale, Tensor v_scale) -> ()");
   cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
                  &reshape_and_cache_flash);
+
+  cache_ops.def(
+      "reshape_and_cache_turboquant(Tensor key, Tensor value,"
+      "                             Tensor! kv_cache,"
+      "                             Tensor slot_mapping,"
+      "                             Tensor rotation,"
+      "                             Tensor qjl_state,"
+      "                             Tensor codebook,"
+      "                             int value_group_size) -> ()");
+  cache_ops.impl("reshape_and_cache_turboquant", torch::kCUDA,
+                 &reshape_and_cache_turboquant);
 
   // Concat kv_c and k_pe and cache them.
   cache_ops.def(

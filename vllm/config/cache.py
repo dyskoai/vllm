@@ -20,6 +20,7 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "turboquant_3_2",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -149,6 +150,10 @@ class CacheConfig:
     """The backend to use for KV cache offloading. Supported backends include
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
+    enable_turboquant: bool = False
+    """Enable native TurboQuant KV cache integration."""
+    turboquant_metadata_path: str | None = None
+    """Optional path to TurboQuant calibration metadata."""
 
     def compute_hash(self) -> str:
         """
@@ -229,3 +234,19 @@ class CacheConfig:
                 "scaling factor."
             )
         return cache_dtype
+
+    @model_validator(mode="after")
+    def _validate_turboquant(self) -> "CacheConfig":
+        if self.cache_dtype != "turboquant_3_2":
+            return self
+
+        if not self.enable_turboquant:
+            raise ValueError(
+                "TurboQuant KV cache requires enable_turboquant=True."
+            )
+        if self.block_size != 16:
+            raise ValueError(
+                "TurboQuant KV cache currently requires block_size=16."
+            )
+
+        return self

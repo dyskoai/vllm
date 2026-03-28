@@ -199,6 +199,56 @@ def paged_attention_v2(
     )
 
 
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "turboquant_paged_attention"):
+
+    @register_fake("_C::turboquant_paged_attention")
+    def _turboquant_paged_attention_fake(
+        out: torch.Tensor,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        num_kv_heads: int,
+        scale: float,
+        block_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_size: int,
+        max_seq_len: int,
+        rotation: torch.Tensor,
+        qjl_state: torch.Tensor,
+        codebook: torch.Tensor,
+    ) -> None:
+        return None
+
+
+def turboquant_paged_attention(
+    out: torch.Tensor,
+    query: torch.Tensor,
+    kv_cache: torch.Tensor,
+    num_kv_heads: int,
+    scale: float,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    max_seq_len: int,
+    rotation: torch.Tensor,
+    qjl_state: torch.Tensor,
+    codebook: torch.Tensor,
+) -> None:
+    torch.ops._C.turboquant_paged_attention(
+        out,
+        query,
+        kv_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        seq_lens,
+        block_size,
+        max_seq_len,
+        rotation,
+        qjl_state,
+        codebook,
+    )
+
+
 def paged_attention_rocm(
     out: torch.Tensor,
     exp_sum: torch.Tensor,
@@ -2524,6 +2574,46 @@ def reshape_and_cache_flash(
         kv_cache_dtype,
         k_scale,
         v_scale,
+    )
+
+
+if hasattr(torch.ops, "_C_cache_ops") and hasattr(
+    torch.ops._C_cache_ops, "reshape_and_cache_turboquant"
+):
+
+    @register_fake("_C_cache_ops::reshape_and_cache_turboquant")
+    def _reshape_and_cache_turboquant_fake(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        rotation: torch.Tensor,
+        qjl_state: torch.Tensor,
+        codebook: torch.Tensor,
+        value_group_size: int,
+    ) -> None:
+        return None
+
+
+def reshape_and_cache_turboquant(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    rotation: torch.Tensor,
+    qjl_state: torch.Tensor,
+    codebook: torch.Tensor,
+    value_group_size: int,
+) -> None:
+    torch.ops._C_cache_ops.reshape_and_cache_turboquant(
+        key,
+        value,
+        kv_cache,
+        slot_mapping,
+        rotation,
+        qjl_state,
+        codebook,
+        value_group_size,
     )
 
 
