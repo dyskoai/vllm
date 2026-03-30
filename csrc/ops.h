@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <torch/all.h>
 #include <torch/library.h>
 #include <tuple>
 
