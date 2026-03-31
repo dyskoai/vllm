@@ -20,6 +20,7 @@ from vllm.v1.attention.ops.turboquant_kv_cache import (
 PREFILL_QUERY_CHUNK_SIZE = 128
 # Larger decode tiles reduce loop trips across long contexts.
 TURBOQUANT_DECODE_BLOCK_N = 64
+TURBOQUANT_DECODE_BLOCK_Q = 2
 TURBOQUANT_GROUP0_DIM = 32
 TURBOQUANT_GROUP1_DIM = 96
 TURBOQUANT_GROUP1A_DIM = 64
@@ -60,7 +61,6 @@ def _turboquant_decode_q1_kernel(
     value_cache_ptr,
     block_table_ptr,
     seq_lens_ptr,
-    kv_head_for_query_head_ptr,
     centroids2_ptr,
     centroids1_ptr,
     norm_lut_ptr,
@@ -93,20 +93,24 @@ def _turboquant_decode_q1_kernel(
     out_g1_mse_stride_1,
     out_g1_qjl_stride_0,
     out_g1_qjl_stride_1,
+    num_queries_per_kv,
     softmax_scale,
     logits_soft_cap,
     qjl_scale0,
     qjl_scale1,
     block_size: tl.constexpr,
-    num_heads: tl.constexpr,
+    block_q: tl.constexpr,
     block_n: tl.constexpr,
     group0_dim: tl.constexpr,
     group1a_dim: tl.constexpr,
     group1b_dim: tl.constexpr,
 ):
     seq_idx = tl.program_id(0)
-    head_idx = tl.program_id(1)
-    kv_head_idx = tl.load(kv_head_for_query_head_ptr + head_idx)
+    kv_head_idx = tl.program_id(1)
+    q_block_idx = tl.program_id(2)
+    q_offsets = q_block_idx * block_q + tl.arange(0, block_q)
+    head_idx = kv_head_idx * num_queries_per_kv + q_offsets
+    head_mask = q_offsets < num_queries_per_kv
     seq_len = tl.load(seq_lens_ptr + seq_idx)
 
     offs_n = tl.arange(0, block_n)
@@ -117,50 +121,62 @@ def _turboquant_decode_q1_kernel(
     q_rot0 = tl.load(
         q_rot0_ptr
         + seq_idx * q_rot0_stride_0
-        + head_idx * q_rot0_stride_1
-        + offs_d0,
+        + head_idx[:, None] * q_rot0_stride_1
+        + offs_d0[None, :],
+        mask=head_mask[:, None],
+        other=0.0,
     ).to(tl.float32)
     q_qjl0 = tl.load(
         q_qjl0_ptr
         + seq_idx * q_qjl0_stride_0
-        + head_idx * q_qjl0_stride_1
-        + offs_d0,
+        + head_idx[:, None] * q_qjl0_stride_1
+        + offs_d0[None, :],
+        mask=head_mask[:, None],
+        other=0.0,
     ).to(tl.float32)
     q_rot1 = tl.load(
         q_rot1_ptr
         + seq_idx * q_rot1_stride_0
-        + head_idx * q_rot1_stride_1
-        + offs_d1a,
+        + head_idx[:, None] * q_rot1_stride_1
+        + offs_d1a[None, :],
+        mask=head_mask[:, None],
+        other=0.0,
     ).to(tl.float32)
     q_rot1b = tl.load(
         q_rot1_ptr
         + seq_idx * q_rot1_stride_0
-        + head_idx * q_rot1_stride_1
+        + head_idx[:, None] * q_rot1_stride_1
         + group1a_dim
-        + offs_d1b,
+        + offs_d1b[None, :],
+        mask=head_mask[:, None],
+        other=0.0,
     ).to(tl.float32)
     q_qjl1 = tl.load(
         q_qjl1_ptr
         + seq_idx * q_qjl1_stride_0
-        + head_idx * q_qjl1_stride_1
-        + offs_d1a,
+        + head_idx[:, None] * q_qjl1_stride_1
+        + offs_d1a[None, :],
+        mask=head_mask[:, None],
+        other=0.0,
     ).to(tl.float32)
     q_qjl1b = tl.load(
         q_qjl1_ptr
         + seq_idx * q_qjl1_stride_0
-        + head_idx * q_qjl1_stride_1
+        + head_idx[:, None] * q_qjl1_stride_1
         + group1a_dim
-        + offs_d1b,
+        + offs_d1b[None, :],
+        mask=head_mask[:, None],
+        other=0.0,
     ).to(tl.float32)
 
-    m_i = -float("inf")
-    l_i = 0.0
-    acc_g0_mse = tl.zeros([group0_dim], dtype=tl.float32)
-    acc_g0_qjl = tl.zeros([group0_dim], dtype=tl.float32)
-    acc_g1a_mse = tl.zeros([group1a_dim], dtype=tl.float32)
-    acc_g1a_qjl = tl.zeros([group1a_dim], dtype=tl.float32)
-    acc_g1b_mse = tl.zeros([group1b_dim], dtype=tl.float32)
-    acc_g1b_qjl = tl.zeros([group1b_dim], dtype=tl.float32)
+    m_i = tl.full([block_q], -float("inf"), dtype=tl.float32)
+    l_i = tl.zeros([block_q], dtype=tl.float32)
+    acc_g0_mse = tl.zeros([block_q, group0_dim], dtype=tl.float32)
+    acc_g0_qjl = tl.zeros([block_q, group0_dim], dtype=tl.float32)
+    acc_g1a_mse = tl.zeros([block_q, group1a_dim], dtype=tl.float32)
+    acc_g1a_qjl = tl.zeros([block_q, group1a_dim], dtype=tl.float32)
+    acc_g1b_mse = tl.zeros([block_q, group1b_dim], dtype=tl.float32)
+    acc_g1b_qjl = tl.zeros([block_q, group1b_dim], dtype=tl.float32)
 
     for start_n in range(0, seq_len, block_n):
         tok_idx = start_n + offs_n
@@ -238,18 +254,20 @@ def _turboquant_decode_q1_kernel(
         g1_vec_norm = _load_norm_from_lut(norm_lut_ptr, key_cache_ptr, key_base, 40)
         g1_res_norm = _load_norm_from_lut(norm_lut_ptr, key_cache_ptr, key_base, 42)
 
-        score_g0 = g0_vec_norm * (
-            tl.sum(g0_centroids * q_rot0[None, :], axis=1)
-            + g0_res_norm * qjl_scale0 * tl.sum(g0_qjl_signs * q_qjl0[None, :], axis=1)
+        score_g0 = g0_vec_norm[None, :] * (
+            tl.sum(g0_centroids[None, :, :] * q_rot0[:, None, :], axis=2)
+            + g0_res_norm[None, :]
+            * qjl_scale0
+            * tl.sum(g0_qjl_signs[None, :, :] * q_qjl0[:, None, :], axis=2)
         )
-        score_g1 = g1_vec_norm * (
-            tl.sum(g1a_centroids * q_rot1[None, :], axis=1)
-            + tl.sum(g1b_centroids * q_rot1b[None, :], axis=1)
-            + g1_res_norm
+        score_g1 = g1_vec_norm[None, :] * (
+            tl.sum(g1a_centroids[None, :, :] * q_rot1[:, None, :], axis=2)
+            + tl.sum(g1b_centroids[None, :, :] * q_rot1b[:, None, :], axis=2)
+            + g1_res_norm[None, :]
             * qjl_scale1
             * (
-                tl.sum(g1a_qjl_signs * q_qjl1[None, :], axis=1)
-                + tl.sum(g1b_qjl_signs * q_qjl1b[None, :], axis=1)
+                tl.sum(g1a_qjl_signs[None, :, :] * q_qjl1[:, None, :], axis=2)
+                + tl.sum(g1b_qjl_signs[None, :, :] * q_qjl1b[:, None, :], axis=2)
             )
         )
 
@@ -259,19 +277,19 @@ def _turboquant_decode_q1_kernel(
             )
         else:
             scores = (score_g0 + score_g1) * softmax_scale
-        scores = tl.where(tok_mask, scores, float("-inf"))
+        scores = tl.where(head_mask[:, None] & tok_mask[None, :], scores, float("-inf"))
 
-        m_ij = tl.maximum(m_i, tl.max(scores, axis=0))
+        m_ij = tl.maximum(m_i, tl.max(scores, axis=1))
         alpha = tl.exp(m_i - m_ij)
-        probs = tl.exp(scores - m_ij)
-        probs = tl.where(tok_mask, probs, 0.0)
+        probs = tl.exp(scores - m_ij[:, None])
+        probs = tl.where(head_mask[:, None] & tok_mask[None, :], probs, 0.0)
 
-        acc_g0_mse *= alpha
-        acc_g0_qjl *= alpha
-        acc_g1a_mse *= alpha
-        acc_g1a_qjl *= alpha
-        acc_g1b_mse *= alpha
-        acc_g1b_qjl *= alpha
+        acc_g0_mse *= alpha[:, None]
+        acc_g0_qjl *= alpha[:, None]
+        acc_g1a_mse *= alpha[:, None]
+        acc_g1a_qjl *= alpha[:, None]
+        acc_g1b_mse *= alpha[:, None]
+        acc_g1b_qjl *= alpha[:, None]
 
         value_base = (
             block_ids * v_stride_0 + tok_in_block * v_stride_1 + kv_head_idx * v_stride_2
@@ -343,52 +361,81 @@ def _turboquant_decode_q1_kernel(
         vg1_vec_norm = _load_norm_from_lut(norm_lut_ptr, value_cache_ptr, value_base, 40)
         vg1_res_norm = _load_norm_from_lut(norm_lut_ptr, value_cache_ptr, value_base, 42)
 
-        weight_g0 = probs * vg0_vec_norm
-        weight_g1 = probs * vg1_vec_norm
-        res_weight_g0 = weight_g0 * vg0_res_norm
-        res_weight_g1 = weight_g1 * vg1_res_norm
+        weight_g0 = probs * vg0_vec_norm[None, :]
+        weight_g1 = probs * vg1_vec_norm[None, :]
+        res_weight_g0 = weight_g0 * vg0_res_norm[None, :]
+        res_weight_g1 = weight_g1 * vg1_res_norm[None, :]
 
-        acc_g0_mse += tl.sum(weight_g0[:, None] * vg0_centroids, axis=0)
-        acc_g0_qjl += tl.sum(res_weight_g0[:, None] * vg0_qjl_signs, axis=0)
+        acc_g0_mse += tl.sum(weight_g0[:, :, None] * vg0_centroids[None, :, :], axis=1)
+        acc_g0_qjl += tl.sum(
+            res_weight_g0[:, :, None] * vg0_qjl_signs[None, :, :], axis=1
+        )
         acc_g1a_mse += tl.sum(
-            weight_g1[:, None] * vg1a_centroids,
-            axis=0,
+            weight_g1[:, :, None] * vg1a_centroids[None, :, :],
+            axis=1,
         )
         acc_g1a_qjl += tl.sum(
-            res_weight_g1[:, None] * vg1a_qjl_signs,
-            axis=0,
+            res_weight_g1[:, :, None] * vg1a_qjl_signs[None, :, :],
+            axis=1,
         )
         acc_g1b_mse += tl.sum(
-            weight_g1[:, None] * vg1b_centroids,
-            axis=0,
+            weight_g1[:, :, None] * vg1b_centroids[None, :, :],
+            axis=1,
         )
         acc_g1b_qjl += tl.sum(
-            res_weight_g1[:, None] * vg1b_qjl_signs,
-            axis=0,
+            res_weight_g1[:, :, None] * vg1b_qjl_signs[None, :, :],
+            axis=1,
         )
 
-        l_i = l_i * alpha + tl.sum(probs, axis=0)
+        l_i = l_i * alpha + tl.sum(probs, axis=1)
         m_i = m_ij
 
+    safe_l = tl.where(head_mask, l_i, 1.0)
     out_g0_mse_ptrs = (
-        out_g0_mse_ptr + seq_idx * out_g0_mse_stride_0 + head_idx * out_g0_mse_stride_1 + offs_d0
+        out_g0_mse_ptr
+        + seq_idx * out_g0_mse_stride_0
+        + head_idx[:, None] * out_g0_mse_stride_1
+        + offs_d0[None, :]
     )
     out_g0_qjl_ptrs = (
-        out_g0_qjl_ptr + seq_idx * out_g0_qjl_stride_0 + head_idx * out_g0_qjl_stride_1 + offs_d0
+        out_g0_qjl_ptr
+        + seq_idx * out_g0_qjl_stride_0
+        + head_idx[:, None] * out_g0_qjl_stride_1
+        + offs_d0[None, :]
     )
     out_g1_mse_base = (
-        out_g1_mse_ptr + seq_idx * out_g1_mse_stride_0 + head_idx * out_g1_mse_stride_1
+        out_g1_mse_ptr
+        + seq_idx * out_g1_mse_stride_0
+        + head_idx[:, None] * out_g1_mse_stride_1
     )
     out_g1_qjl_base = (
-        out_g1_qjl_ptr + seq_idx * out_g1_qjl_stride_0 + head_idx * out_g1_qjl_stride_1
+        out_g1_qjl_ptr
+        + seq_idx * out_g1_qjl_stride_0
+        + head_idx[:, None] * out_g1_qjl_stride_1
     )
 
-    tl.store(out_g0_mse_ptrs, acc_g0_mse / l_i)
-    tl.store(out_g0_qjl_ptrs, acc_g0_qjl / l_i)
-    tl.store(out_g1_mse_base + offs_d1a, acc_g1a_mse / l_i)
-    tl.store(out_g1_qjl_base + offs_d1a, acc_g1a_qjl / l_i)
-    tl.store(out_g1_mse_base + group1a_dim + offs_d1b, acc_g1b_mse / l_i)
-    tl.store(out_g1_qjl_base + group1a_dim + offs_d1b, acc_g1b_qjl / l_i)
+    tl.store(out_g0_mse_ptrs, acc_g0_mse / safe_l[:, None], mask=head_mask[:, None])
+    tl.store(out_g0_qjl_ptrs, acc_g0_qjl / safe_l[:, None], mask=head_mask[:, None])
+    tl.store(
+        out_g1_mse_base + offs_d1a[None, :],
+        acc_g1a_mse / safe_l[:, None],
+        mask=head_mask[:, None],
+    )
+    tl.store(
+        out_g1_qjl_base + offs_d1a[None, :],
+        acc_g1a_qjl / safe_l[:, None],
+        mask=head_mask[:, None],
+    )
+    tl.store(
+        out_g1_mse_base + group1a_dim + offs_d1b[None, :],
+        acc_g1b_mse / safe_l[:, None],
+        mask=head_mask[:, None],
+    )
+    tl.store(
+        out_g1_qjl_base + group1a_dim + offs_d1b[None, :],
+        acc_g1b_qjl / safe_l[:, None],
+        mask=head_mask[:, None],
+    )
 
 
 def _turboquant_decode_q1_fused(
@@ -446,8 +493,14 @@ def _turboquant_decode_q1_fused(
     centroids1 = centroids[1].contiguous()
     qjl_scale0 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP0_DIM
     qjl_scale1 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP1_DIM
+    num_kv_heads = key_cache.shape[2]
+    num_queries_per_kv = num_heads // num_kv_heads
 
-    grid = (num_tokens, num_heads)
+    grid = (
+        num_tokens,
+        num_kv_heads,
+        triton.cdiv(num_queries_per_kv, TURBOQUANT_DECODE_BLOCK_Q),
+    )
     _turboquant_decode_q1_kernel[grid](
         q_rot0,
         q_qjl0,
@@ -457,7 +510,6 @@ def _turboquant_decode_q1_fused(
         value_cache,
         block_table,
         seq_lens,
-        kv_head_for_query_head,
         centroids2,
         centroids1,
         norm_lut,
@@ -490,12 +542,13 @@ def _turboquant_decode_q1_fused(
         out_g1_mse.stride(1),
         out_g1_qjl.stride(0),
         out_g1_qjl.stride(1),
+        num_queries_per_kv,
         softmax_scale,
         logits_soft_cap,
         qjl_scale0,
         qjl_scale1,
         block_size=key_cache.shape[1],
-        num_heads=num_heads,
+        block_q=TURBOQUANT_DECODE_BLOCK_Q,
         block_n=TURBOQUANT_DECODE_BLOCK_N,
         group0_dim=TURBOQUANT_GROUP0_DIM,
         group1a_dim=TURBOQUANT_GROUP1A_DIM,
