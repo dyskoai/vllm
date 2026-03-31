@@ -13,6 +13,8 @@ from vllm.v1.attention.ops.turboquant_kv_cache import (
     get_turboquant_layout,
 )
 
+PREFILL_QUERY_CHUNK_SIZE = 128
+
 
 @cache
 def _norm_lut(device_type: str, device_index: int | None) -> torch.Tensor:
@@ -155,21 +157,32 @@ def turboquant_decode_attention_fwd(
             .index_select(0, kv_head_for_query_head)
             .to(torch.float32)
         )
-        logits = torch.einsum("hqd,hkd->hqk", q_states, k_states) * softmax_scale
-        logits = logits.masked_fill(~allowed.unsqueeze(0), float("-inf"))
-        if logits_soft_cap > 0:
-            logits = logits_soft_cap * torch.tanh(logits / logits_soft_cap)
         if sinks is not None:
-            sink_logits = sinks[:, None, None].to(torch.float32).expand(-1, q_len, 1)
+            sink_logits = sinks[:, None, None].to(torch.float32)
             zero_value = torch.zeros(
                 (query.shape[1], 1, query.shape[2]),
                 dtype=torch.float32,
                 device=query.device,
             )
             v_states = torch.cat((v_states, zero_value), dim=1)
-            logits = torch.cat((logits, sink_logits), dim=-1)
-        attn = torch.softmax(logits, dim=-1)
-        seq_output = torch.einsum("hqk,hkd->hqd", attn, v_states)
+
+        output_chunks: list[torch.Tensor] = []
+        for chunk_start in range(0, q_len, PREFILL_QUERY_CHUNK_SIZE):
+            chunk_end = min(chunk_start + PREFILL_QUERY_CHUNK_SIZE, q_len)
+            q_chunk = q_states[:, chunk_start:chunk_end, :]
+            allowed_chunk = allowed[chunk_start:chunk_end]
+
+            logits = torch.einsum("hqd,hkd->hqk", q_chunk, k_states) * softmax_scale
+            logits = logits.masked_fill(~allowed_chunk.unsqueeze(0), float("-inf"))
+            if logits_soft_cap > 0:
+                logits = logits_soft_cap * torch.tanh(logits / logits_soft_cap)
+            if sinks is not None:
+                sink_chunk = sink_logits.expand(-1, chunk_end - chunk_start, 1)
+                logits = torch.cat((logits, sink_chunk), dim=-1)
+            attn = torch.softmax(logits, dim=-1)
+            output_chunks.append(torch.einsum("hqk,hkd->hqd", attn, v_states))
+
+        seq_output = torch.cat(output_chunks, dim=1)
         output[q_start:q_end].copy_(seq_output.permute(1, 0, 2).to(output.dtype))
 
     return output
