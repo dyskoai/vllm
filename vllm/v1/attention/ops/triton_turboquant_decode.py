@@ -18,10 +18,12 @@ from vllm.v1.attention.ops.turboquant_kv_cache import (
 )
 
 PREFILL_QUERY_CHUNK_SIZE = 128
-TURBOQUANT_DECODE_BLOCK_N = 32
+# Larger decode tiles reduce loop trips across long contexts.
+TURBOQUANT_DECODE_BLOCK_N = 64
 TURBOQUANT_GROUP0_DIM = 32
 TURBOQUANT_GROUP1_DIM = 96
-TURBOQUANT_GROUP1_PADDED = 128
+# Keep the low-precision group at its true width to avoid extra masked work.
+TURBOQUANT_GROUP1_PADDED = 96
 
 
 @cache
