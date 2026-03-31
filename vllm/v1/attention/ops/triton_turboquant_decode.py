@@ -22,8 +22,8 @@ PREFILL_QUERY_CHUNK_SIZE = 128
 TURBOQUANT_DECODE_BLOCK_N = 64
 TURBOQUANT_GROUP0_DIM = 32
 TURBOQUANT_GROUP1_DIM = 96
-# Keep the low-precision group at its true width to avoid extra masked work.
-TURBOQUANT_GROUP1_PADDED = 96
+# Triton arange requires a power-of-two width.
+TURBOQUANT_GROUP1_PADDED = 128
 
 
 @cache
