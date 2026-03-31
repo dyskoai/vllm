@@ -249,6 +249,74 @@ def turboquant_paged_attention(
     )
 
 
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "turboquant_decode_q1_paged"):
+
+    @register_fake("_C::turboquant_decode_q1_paged")
+    def _turboquant_decode_q1_paged_fake(
+        out_g0_mse: torch.Tensor,
+        out_g0_qjl: torch.Tensor,
+        out_g1_mse: torch.Tensor,
+        out_g1_qjl: torch.Tensor,
+        q_rot0: torch.Tensor,
+        q_qjl0: torch.Tensor,
+        q_rot1: torch.Tensor,
+        q_qjl1: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        kv_head_for_query_head: torch.Tensor,
+        centroids2: torch.Tensor,
+        centroids1: torch.Tensor,
+        norm_lut: torch.Tensor,
+        scale: float,
+        logits_soft_cap: float,
+    ) -> None:
+        return None
+
+
+def turboquant_decode_q1_paged(
+    out_g0_mse: torch.Tensor,
+    out_g0_qjl: torch.Tensor,
+    out_g1_mse: torch.Tensor,
+    out_g1_qjl: torch.Tensor,
+    q_rot0: torch.Tensor,
+    q_qjl0: torch.Tensor,
+    q_rot1: torch.Tensor,
+    q_qjl1: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    kv_head_for_query_head: torch.Tensor,
+    centroids2: torch.Tensor,
+    centroids1: torch.Tensor,
+    norm_lut: torch.Tensor,
+    scale: float,
+    logits_soft_cap: float,
+) -> None:
+    torch.ops._C.turboquant_decode_q1_paged(
+        out_g0_mse,
+        out_g0_qjl,
+        out_g1_mse,
+        out_g1_qjl,
+        q_rot0,
+        q_qjl0,
+        q_rot1,
+        q_qjl1,
+        key_cache,
+        value_cache,
+        block_tables,
+        seq_lens,
+        kv_head_for_query_head,
+        centroids2,
+        centroids1,
+        norm_lut,
+        scale,
+        logits_soft_cap,
+    )
+
+
 def paged_attention_rocm(
     out: torch.Tensor,
     exp_sum: torch.Tensor,

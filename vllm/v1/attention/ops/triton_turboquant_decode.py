@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 from functools import cache
+import os
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.turboquant_kv_cache import (
     TURBOQUANT_QJL_SCALE,
@@ -35,6 +37,11 @@ def _norm_lut(device_type: str, device_index: int | None) -> torch.Tensor:
 
 def get_turboquant_norm_lut(device: torch.device) -> torch.Tensor:
     return _norm_lut(device.type, device.index)
+
+
+@cache
+def _native_q1_decode_enabled() -> bool:
+    return os.getenv("VLLM_TURBOQUANT_NATIVE_Q1", "0") == "1"
 
 
 @triton.jit
@@ -447,60 +454,88 @@ def _turboquant_decode_q1_fused(
     qjl_scale0 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP0_DIM
     qjl_scale1 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP1_DIM
 
-    grid = (num_tokens, num_heads)
-    _turboquant_decode_q1_kernel[grid](
-        q_rot0,
-        q_qjl0,
-        q_rot1,
-        q_qjl1,
-        key_cache,
-        value_cache,
-        block_table,
-        seq_lens,
-        kv_head_for_query_head,
-        centroids2,
-        centroids1,
-        norm_lut,
-        out_g0_mse,
-        out_g0_qjl,
-        out_g1_mse,
-        out_g1_qjl,
-        q_rot0.stride(0),
-        q_rot0.stride(1),
-        q_qjl0.stride(0),
-        q_qjl0.stride(1),
-        q_rot1.stride(0),
-        q_rot1.stride(1),
-        q_qjl1.stride(0),
-        q_qjl1.stride(1),
-        key_cache.stride(0),
-        key_cache.stride(1),
-        key_cache.stride(2),
-        key_cache.stride(3),
-        value_cache.stride(0),
-        value_cache.stride(1),
-        value_cache.stride(2),
-        value_cache.stride(3),
-        block_table.stride(0),
-        out_g0_mse.stride(0),
-        out_g0_mse.stride(1),
-        out_g0_qjl.stride(0),
-        out_g0_qjl.stride(1),
-        out_g1_mse.stride(0),
-        out_g1_mse.stride(1),
-        out_g1_qjl.stride(0),
-        out_g1_qjl.stride(1),
-        softmax_scale,
-        logits_soft_cap,
-        qjl_scale0,
-        qjl_scale1,
-        block_size=key_cache.shape[1],
-        num_heads=num_heads,
-        block_n=TURBOQUANT_DECODE_BLOCK_N,
-        group0_dim=TURBOQUANT_GROUP0_DIM,
-        group1a_dim=TURBOQUANT_GROUP1A_DIM,
-        group1b_dim=TURBOQUANT_GROUP1B_DIM,
-    )
+    used_native = False
+    if _native_q1_decode_enabled():
+        try:
+            ops.turboquant_decode_q1_paged(
+                out_g0_mse,
+                out_g0_qjl,
+                out_g1_mse,
+                out_g1_qjl,
+                q_rot0,
+                q_qjl0,
+                q_rot1,
+                q_qjl1,
+                key_cache,
+                value_cache,
+                block_table,
+                seq_lens,
+                kv_head_for_query_head,
+                centroids2,
+                centroids1,
+                norm_lut,
+                softmax_scale,
+                logits_soft_cap,
+            )
+            used_native = True
+        except RuntimeError:
+            used_native = False
+
+    if not used_native:
+        grid = (num_tokens, num_heads)
+        _turboquant_decode_q1_kernel[grid](
+            q_rot0,
+            q_qjl0,
+            q_rot1,
+            q_qjl1,
+            key_cache,
+            value_cache,
+            block_table,
+            seq_lens,
+            kv_head_for_query_head,
+            centroids2,
+            centroids1,
+            norm_lut,
+            out_g0_mse,
+            out_g0_qjl,
+            out_g1_mse,
+            out_g1_qjl,
+            q_rot0.stride(0),
+            q_rot0.stride(1),
+            q_qjl0.stride(0),
+            q_qjl0.stride(1),
+            q_rot1.stride(0),
+            q_rot1.stride(1),
+            q_qjl1.stride(0),
+            q_qjl1.stride(1),
+            key_cache.stride(0),
+            key_cache.stride(1),
+            key_cache.stride(2),
+            key_cache.stride(3),
+            value_cache.stride(0),
+            value_cache.stride(1),
+            value_cache.stride(2),
+            value_cache.stride(3),
+            block_table.stride(0),
+            out_g0_mse.stride(0),
+            out_g0_mse.stride(1),
+            out_g0_qjl.stride(0),
+            out_g0_qjl.stride(1),
+            out_g1_mse.stride(0),
+            out_g1_mse.stride(1),
+            out_g1_qjl.stride(0),
+            out_g1_qjl.stride(1),
+            softmax_scale,
+            logits_soft_cap,
+            qjl_scale0,
+            qjl_scale1,
+            block_size=key_cache.shape[1],
+            num_heads=num_heads,
+            block_n=TURBOQUANT_DECODE_BLOCK_N,
+            group0_dim=TURBOQUANT_GROUP0_DIM,
+            group1a_dim=TURBOQUANT_GROUP1A_DIM,
+            group1b_dim=TURBOQUANT_GROUP1B_DIM,
+        )
 
     group0 = _apply_mse_inverse_transform(out_g0_mse, value_rotations[0]) + (
         _apply_qjl_inverse_transform(out_g0_qjl, value_qjl_matrices[0])

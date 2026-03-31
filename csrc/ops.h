@@ -61,6 +61,16 @@ void turboquant_paged_attention(
     torch::Tensor& rotation, torch::Tensor& qjl_state,
     torch::Tensor& codebook);
 
+void turboquant_decode_q1_paged(
+    torch::Tensor& out_g0_mse, torch::Tensor& out_g0_qjl,
+    torch::Tensor& out_g1_mse, torch::Tensor& out_g1_qjl,
+    torch::Tensor& q_rot0, torch::Tensor& q_qjl0, torch::Tensor& q_rot1,
+    torch::Tensor& q_qjl1, torch::Tensor& key_cache, torch::Tensor& value_cache,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens,
+    torch::Tensor& kv_head_for_query_head, torch::Tensor& centroids2,
+    torch::Tensor& centroids1, torch::Tensor& norm_lut, double scale,
+    double logits_soft_cap);
+
 void merge_attn_states(torch::Tensor& output,
                        std::optional<torch::Tensor> output_lse,
                        const torch::Tensor& prefix_output,

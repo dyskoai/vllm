@@ -72,6 +72,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("turboquant_paged_attention", torch::kCUDA,
            &turboquant_paged_attention);
 
+  ops.def(
+      "turboquant_decode_q1_paged("
+      "    Tensor! out_g0_mse, Tensor! out_g0_qjl,"
+      "    Tensor! out_g1_mse, Tensor! out_g1_qjl,"
+      "    Tensor q_rot0, Tensor q_qjl0, Tensor q_rot1, Tensor q_qjl1,"
+      "    Tensor key_cache, Tensor value_cache, Tensor block_tables,"
+      "    Tensor seq_lens, Tensor kv_head_for_query_head,"
+      "    Tensor centroids2, Tensor centroids1, Tensor norm_lut,"
+      "    float scale, float logits_soft_cap) -> ()");
+  ops.impl("turboquant_decode_q1_paged", torch::kCUDA,
+           &turboquant_decode_q1_paged);
+
   // Merge attn states
   // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
   // can be used to combine partial attention results (in the split-KV case)
