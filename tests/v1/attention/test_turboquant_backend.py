@@ -10,7 +10,20 @@ from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
-from vllm.v1.attention.ops.turboquant_kv_cache import get_turboquant_packed_dim
+from vllm.v1.attention.ops.triton_turboquant_kv_update import (
+    turboquant_write_packed_kv,
+)
+from vllm.v1.attention.ops.turboquant_kv_cache import (
+    get_turboquant_centroids,
+    get_turboquant_layout,
+    get_turboquant_mse_transform_matrix,
+    get_turboquant_packed_dim,
+    get_turboquant_qjl_matrix,
+    get_turboquant_rotation,
+)
+from vllm.v1.attention.ops.turboquant_metadata import (
+    build_default_turboquant_metadata,
+)
 from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
 from vllm.v1.kv_cache_interface import TurboQuantAttentionSpec
 
@@ -192,4 +205,67 @@ def test_selector_rejects_turboquant_on_cpu():
             head_size=128,
             dtype=torch.float16,
             kv_cache_dtype="turboquant_3_2",
+        )
+
+
+def test_turboquant_write_packed_kv_requires_sign_vectors():
+    device = torch.device("cpu")
+    head_size = 128
+    num_kv_heads = 4
+    layout = get_turboquant_layout("turboquant_3_2", head_size)
+    metadata = build_default_turboquant_metadata(
+        recipe="turboquant_3_2",
+        head_size=head_size,
+        num_kv_heads=num_kv_heads,
+        layer_names=["attn"],
+    )
+    group_indices = metadata.get_layer("attn").key.get_group_indices(
+        device, head_size, "turboquant_3_2"
+    )
+    rotations = tuple(
+        get_turboquant_rotation(device, group.dim, idx)
+        for idx, group in enumerate(layout.groups)
+    )
+    qjl_matrices = tuple(
+        get_turboquant_qjl_matrix(device, group.dim, idx)
+        for idx, group in enumerate(layout.groups)
+    )
+    centroids = {
+        group.bits: get_turboquant_centroids(device, group.dim, group.bits)
+        for group in layout.groups
+    }
+    x = torch.randn(3, num_kv_heads, head_size, dtype=torch.float32)
+    cache = torch.zeros(1, 16, num_kv_heads, layout.packed_dim, dtype=torch.uint8)
+    slot_mapping = torch.tensor([0, 1, 2], dtype=torch.int32)
+    unused_mse_to_qjl = tuple(torch.empty(0) for _ in layout.groups)
+
+    turboquant_write_packed_kv(
+        x,
+        cache,
+        slot_mapping,
+        layout,
+        group_indices,
+        rotations,
+        qjl_matrices,
+        unused_mse_to_qjl,
+        centroids,
+    )
+
+    assert torch.count_nonzero(cache[0, :3]) > 0
+
+    mse_matrices = tuple(
+        get_turboquant_mse_transform_matrix(device, group.dim, idx)
+        for idx, group in enumerate(layout.groups)
+    )
+    with pytest.raises(ValueError, match="1D sign vectors"):
+        turboquant_write_packed_kv(
+            x,
+            cache,
+            slot_mapping,
+            layout,
+            group_indices,
+            mse_matrices,
+            qjl_matrices,
+            unused_mse_to_qjl,
+            centroids,
         )

@@ -17,8 +17,8 @@ def turboquant_write_packed_kv(
     slot_mapping: torch.Tensor,
     layout: TurboQuantLayout,
     group_indices: tuple[torch.Tensor, torch.Tensor],
-    mse_transform_matrices: tuple[torch.Tensor, torch.Tensor],
-    qjl_transform_matrices: tuple[torch.Tensor, torch.Tensor],
+    rotations: tuple[torch.Tensor, torch.Tensor],
+    qjl_matrices: tuple[torch.Tensor, torch.Tensor],
     mse_to_qjl_matrices: tuple[torch.Tensor, torch.Tensor],
     centroids: dict[int, torch.Tensor],
 ) -> None:
@@ -42,6 +42,22 @@ def turboquant_write_packed_kv(
     if slot_mapping.ndim != 1 or slot_mapping.shape[0] != x.shape[0]:
         raise ValueError("slot_mapping must be a 1D tensor aligned with input tokens.")
 
+    for name, transforms in (
+        ("rotations", rotations),
+        ("qjl_matrices", qjl_matrices),
+    ):
+        for group_layout, transform in zip(layout.groups, transforms, strict=True):
+            if transform.ndim != 1:
+                raise ValueError(
+                    f"TurboQuant {name} must contain 1D sign vectors, got "
+                    f"{tuple(transform.shape)} for group dim {group_layout.dim}."
+                )
+            if transform.numel() != group_layout.dim:
+                raise ValueError(
+                    f"TurboQuant {name} sign vector length mismatch: expected "
+                    f"{group_layout.dim}, got {transform.numel()}."
+                )
+
     valid = slot_mapping >= 0
     if not valid.any():
         return
@@ -49,8 +65,8 @@ def turboquant_write_packed_kv(
     packed = quantize_turboquant_vectors(
         x[valid],
         "turboquant_3_2",
-        mse_transform_matrices,
-        qjl_transform_matrices,
+        rotations,
+        qjl_matrices,
         centroids,
         group_indices,
     )
