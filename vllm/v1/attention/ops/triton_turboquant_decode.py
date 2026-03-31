@@ -93,9 +93,14 @@ def _turboquant_decode_q1_kernel(
     out_g1_qjl_stride_1,
     softmax_scale,
     logits_soft_cap,
+    qjl_scale0,
+    qjl_scale1,
     block_size: tl.constexpr,
     num_heads: tl.constexpr,
     block_n: tl.constexpr,
+    group0_dim: tl.constexpr,
+    group1_dim: tl.constexpr,
+    group1_padded: tl.constexpr,
 ):
     seq_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
@@ -103,9 +108,9 @@ def _turboquant_decode_q1_kernel(
     seq_len = tl.load(seq_lens_ptr + seq_idx)
 
     offs_n = tl.arange(0, block_n)
-    offs_d0 = tl.arange(0, TURBOQUANT_GROUP0_DIM)
-    offs_d1 = tl.arange(0, TURBOQUANT_GROUP1_PADDED)
-    mask_d1 = offs_d1 < TURBOQUANT_GROUP1_DIM
+    offs_d0 = tl.arange(0, group0_dim)
+    offs_d1 = tl.arange(0, group1_padded)
+    mask_d1 = offs_d1 < group1_dim
 
     q_rot0 = tl.load(
         q_rot0_ptr
@@ -136,15 +141,12 @@ def _turboquant_decode_q1_kernel(
         other=0.0,
     ).to(tl.float32)
 
-    qjl_scale0 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP0_DIM
-    qjl_scale1 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP1_DIM
-
     m_i = -float("inf")
     l_i = 0.0
-    acc_g0_mse = tl.zeros([TURBOQUANT_GROUP0_DIM], dtype=tl.float32)
-    acc_g0_qjl = tl.zeros([TURBOQUANT_GROUP0_DIM], dtype=tl.float32)
-    acc_g1_mse = tl.zeros([TURBOQUANT_GROUP1_PADDED], dtype=tl.float32)
-    acc_g1_qjl = tl.zeros([TURBOQUANT_GROUP1_PADDED], dtype=tl.float32)
+    acc_g0_mse = tl.zeros([group0_dim], dtype=tl.float32)
+    acc_g0_qjl = tl.zeros([group0_dim], dtype=tl.float32)
+    acc_g1_mse = tl.zeros([group1_padded], dtype=tl.float32)
+    acc_g1_qjl = tl.zeros([group1_padded], dtype=tl.float32)
 
     for start_n in range(0, seq_len, block_n):
         tok_idx = start_n + offs_n
@@ -211,10 +213,13 @@ def _turboquant_decode_q1_kernel(
             + g1_res_norm * qjl_scale1 * tl.sum(g1_qjl_signs * q_qjl1[None, :], axis=1)
         )
 
-        scores = (score_g0 + score_g1) * softmax_scale
-        scores = tl.where(tok_mask, scores, float("-inf"))
         if logits_soft_cap > 0:
-            scores = logits_soft_cap * _tanh(scores / logits_soft_cap)
+            scores = logits_soft_cap * _tanh(
+                ((score_g0 + score_g1) * softmax_scale) / logits_soft_cap
+            )
+        else:
+            scores = (score_g0 + score_g1) * softmax_scale
+        scores = tl.where(tok_mask, scores, float("-inf"))
 
         m_ij = tl.maximum(m_i, tl.max(scores, axis=0))
         alpha = tl.exp(m_i - m_ij)
@@ -367,6 +372,8 @@ def _turboquant_decode_q1_fused(
 
     centroids2 = centroids[2].contiguous()
     centroids1 = centroids[1].contiguous()
+    qjl_scale0 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP0_DIM
+    qjl_scale1 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP1_DIM
 
     grid = (num_tokens, num_heads)
     _turboquant_decode_q1_kernel[grid](
@@ -413,9 +420,14 @@ def _turboquant_decode_q1_fused(
         out_g1_qjl.stride(1),
         softmax_scale,
         logits_soft_cap,
+        qjl_scale0,
+        qjl_scale1,
         block_size=key_cache.shape[1],
         num_heads=num_heads,
         block_n=TURBOQUANT_DECODE_BLOCK_N,
+        group0_dim=TURBOQUANT_GROUP0_DIM,
+        group1_dim=TURBOQUANT_GROUP1_DIM,
+        group1_padded=TURBOQUANT_GROUP1_PADDED,
     )
 
     group0 = _apply_mse_inverse_transform(out_g0_mse, value_rotations[0]) + (
@@ -592,9 +604,9 @@ def _turboquant_decode_attention_fallback(
             allowed_chunk = allowed[chunk_start:chunk_end]
 
             logits = torch.einsum("hqd,hkd->hqk", q_chunk, k_states) * softmax_scale
-            logits = logits.masked_fill(~allowed_chunk.unsqueeze(0), float("-inf"))
             if logits_soft_cap > 0:
                 logits = logits_soft_cap * torch.tanh(logits / logits_soft_cap)
+            logits = logits.masked_fill(~allowed_chunk.unsqueeze(0), float("-inf"))
             if sinks is not None:
                 sink_chunk = sink_logits.expand(-1, chunk_end - chunk_start, 1)
                 logits = torch.cat((logits, sink_chunk), dim=-1)
