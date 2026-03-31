@@ -231,8 +231,9 @@ def test_turboquant_write_packed_kv_requires_sign_vectors():
         for idx, group in enumerate(layout.groups)
     )
     centroids = {
-        group.bits: get_turboquant_centroids(device, group.dim, group.bits)
+        group.mse_bits: get_turboquant_centroids(device, group.dim, group.mse_bits)
         for group in layout.groups
+        if group.mse_bits > 0
     }
     x = torch.randn(3, num_kv_heads, head_size, dtype=torch.float32)
     cache = torch.zeros(1, 16, num_kv_heads, layout.packed_dim, dtype=torch.uint8)

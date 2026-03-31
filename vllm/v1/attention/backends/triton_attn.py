@@ -623,8 +623,11 @@ class TritonAttentionImpl(AttentionImpl):
         ) = build_transforms(100)
 
         centroids = {
-            group.bits: get_turboquant_centroids(device, group.dim, group.bits)
+            group.mse_bits: get_turboquant_centroids(
+                device, group.dim, group.mse_bits
+            )
             for group in layout.groups
+            if group.mse_bits > 0
         }
         kv_head_for_query_head = (
             torch.arange(self.num_heads, device=device, dtype=torch.int64)
