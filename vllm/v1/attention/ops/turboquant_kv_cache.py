@@ -522,6 +522,29 @@ def apply_turboquant_query_transforms(
         )
     else:
         gathered_indices = per_query_group_indices
+    if (
+        query_fp32.shape[0] == 1
+        and gathered_indices[0].shape[0] == query_fp32.shape[1]
+        and gathered_indices[1].shape[0] == query_fp32.shape[1]
+    ):
+        query_token = query_fp32[0]
+        gathered_groups = tuple(
+            torch.gather(query_token, dim=-1, index=group) for group in gathered_indices
+        )
+        q_rot = tuple(
+            _apply_mse_transform(group_tensor, rotation).unsqueeze(0)
+            for group_tensor, rotation in zip(gathered_groups, rotations, strict=True)
+        )
+        q_qjl = tuple(
+            (
+                _apply_qjl_transform(group_tensor, qjl_matrix)
+                * (TURBOQUANT_QJL_SCALE / group_tensor.shape[-1])
+            ).unsqueeze(0)
+            for group_tensor, qjl_matrix in zip(
+                gathered_groups, qjl_matrices, strict=True
+            )
+        )
+        return q_rot, q_qjl
     gathered_groups = tuple(
         _gather_group(query_fp32, group) for group in gathered_indices
     )

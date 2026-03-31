@@ -526,8 +526,6 @@ class TritonAttentionImpl(AttentionImpl):
         self.turboquant_metadata_path = turboquant_metadata_path
         self._turboquant_metadata = None
         self._turboquant_state_cache: dict[tuple[str, int | None], dict[str, object]] = {}
-        self._logged_turboquant_prefill_fast_path = False
-        self._logged_turboquant_decode_path = False
 
         if is_turboquant_kv_cache(self.kv_cache_dtype) and not self.turboquant_enabled:
             raise ValueError(
@@ -808,22 +806,6 @@ class TritonAttentionImpl(AttentionImpl):
         attn_metadata: TritonAttentionMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        if not self._logged_turboquant_decode_path:
-            query_lens = (
-                attn_metadata.query_start_loc_cpu[1:]
-                - attn_metadata.query_start_loc_cpu[:-1]
-            )
-            logger.info(
-                "TurboQuant decode path active: num_tokens=%d num_seqs=%d "
-                "max_query_len=%d max_seq_len=%d first_query_lens=%s first_seq_lens=%s",
-                query.shape[0],
-                int(attn_metadata.seq_lens_cpu.numel()),
-                int(attn_metadata.max_query_len),
-                int(attn_metadata.max_seq_len),
-                query_lens[:4].tolist(),
-                attn_metadata.seq_lens_cpu[:4].tolist(),
-            )
-            self._logged_turboquant_decode_path = True
         key_cache, value_cache = kv_cache.unbind(1)
         state = self._get_turboquant_state(query.device)
         return turboquant_decode_attention_fwd(
@@ -832,7 +814,7 @@ class TritonAttentionImpl(AttentionImpl):
             value_cache=value_cache,
             block_table=attn_metadata.block_table,
             query_start_loc=attn_metadata.query_start_loc_cpu,
-            seq_lens=attn_metadata.seq_lens_cpu,
+            seq_lens=attn_metadata.seq_lens,
             key_group_indices=state["key_group_indices"],
             value_group_indices=state["value_group_indices"],
             key_rotations=state["key_rotations"],
@@ -894,21 +876,6 @@ class TritonAttentionImpl(AttentionImpl):
         output: torch.Tensor,
         attn_metadata: TritonAttentionMetadata,
     ) -> torch.Tensor:
-        if not self._logged_turboquant_prefill_fast_path:
-            query_lens = (
-                attn_metadata.query_start_loc_cpu[1:]
-                - attn_metadata.query_start_loc_cpu[:-1]
-            )
-            logger.info(
-                "TurboQuant pure-prompt prefill fast path active: num_tokens=%d "
-                "num_seqs=%d max_query_len=%d max_seq_len=%d first_query_lens=%s",
-                query.shape[0],
-                int(attn_metadata.seq_lens_cpu.numel()),
-                int(attn_metadata.max_query_len),
-                int(attn_metadata.max_seq_len),
-                query_lens[:4].tolist(),
-            )
-            self._logged_turboquant_prefill_fast_path = True
         context_attention_fwd(
             q=query,
             k=key,
