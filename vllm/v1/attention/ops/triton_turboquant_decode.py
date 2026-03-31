@@ -7,6 +7,7 @@ from functools import cache
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.turboquant_kv_cache import (
     TURBOQUANT_QJL_SCALE,
@@ -22,6 +23,17 @@ TURBOQUANT_DECODE_BLOCK_N = 32
 TURBOQUANT_GROUP0_DIM = 32
 TURBOQUANT_GROUP1_DIM = 96
 TURBOQUANT_GROUP1_PADDED = 128
+
+logger = init_logger(__name__)
+_TURBOQUANT_FUSED_TIMING_LOGS_REMAINING = 2
+
+
+def _reserve_fused_timing_log() -> bool:
+    global _TURBOQUANT_FUSED_TIMING_LOGS_REMAINING
+    if _TURBOQUANT_FUSED_TIMING_LOGS_REMAINING <= 0:
+        return False
+    _TURBOQUANT_FUSED_TIMING_LOGS_REMAINING -= 1
+    return True
 
 
 @cache
@@ -340,6 +352,14 @@ def _turboquant_decode_q1_fused(
     logits_soft_cap: float,
     out: torch.Tensor | None,
 ) -> torch.Tensor:
+    log_timing = query.is_cuda and _reserve_fused_timing_log()
+    if log_timing:
+        start_event = torch.cuda.Event(enable_timing=True)
+        post_setup_event = torch.cuda.Event(enable_timing=True)
+        post_kernel_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+
     (q_rot_groups, q_qjl_groups) = apply_turboquant_query_transforms(
         query,
         key_group_indices,
@@ -379,6 +399,9 @@ def _turboquant_decode_q1_fused(
     centroids1 = centroids[1].contiguous()
     qjl_scale0 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP0_DIM
     qjl_scale1 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP1_DIM
+
+    if log_timing:
+        post_setup_event.record()
 
     grid = (num_tokens, num_heads)
     _turboquant_decode_q1_kernel[grid](
@@ -435,6 +458,9 @@ def _turboquant_decode_q1_fused(
         group1_padded=TURBOQUANT_GROUP1_PADDED,
     )
 
+    if log_timing:
+        post_kernel_event.record()
+
     group0 = _apply_mse_inverse_transform(out_g0_mse, value_rotations[0]) + (
         _apply_qjl_inverse_transform(out_g0_qjl, value_qjl_matrices[0])
         * (TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP0_DIM)
@@ -463,6 +489,25 @@ def _turboquant_decode_q1_fused(
         group1,
     )
     output.copy_(output_fp32.to(output.dtype))
+
+    if log_timing:
+        end_event.record()
+        end_event.synchronize()
+        setup_ms = start_event.elapsed_time(post_setup_event)
+        kernel_ms = post_setup_event.elapsed_time(post_kernel_event)
+        reconstruct_ms = post_kernel_event.elapsed_time(end_event)
+        total_ms = start_event.elapsed_time(end_event)
+        logger.info(
+            "TurboQuant fused decode timing: total=%.3fms setup=%.3fms "
+            "kernel=%.3fms reconstruct=%.3fms num_tokens=%d num_heads=%d seq_lens=%s",
+            total_ms,
+            setup_ms,
+            kernel_ms,
+            reconstruct_ms,
+            num_tokens,
+            num_heads,
+            seq_lens[:4].tolist(),
+        )
     return output
 
 
