@@ -467,6 +467,8 @@ class EngineArgs:
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
+    enable_turboquant: bool = CacheConfig.enable_turboquant
+    turboquant_metadata_path: str | None = CacheConfig.turboquant_metadata_path
     max_num_batched_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
@@ -1018,6 +1020,13 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
+        )
+        cache_group.add_argument(
+            "--enable-turboquant", **cache_kwargs["enable_turboquant"]
+        )
+        cache_group.add_argument(
+            "--turboquant-metadata-path",
+            **cache_kwargs["turboquant_metadata_path"],
         )
 
         # Model weight offload related configs
@@ -1579,6 +1588,8 @@ class EngineArgs:
             mamba_cache_mode=self.mamba_cache_mode,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
+            enable_turboquant=self.enable_turboquant,
+            turboquant_metadata_path=self.turboquant_metadata_path,
         )
 
         ray_runtime_env = None

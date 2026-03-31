@@ -75,7 +75,7 @@ def test_triton_backend_shape_and_validation():
     )
     assert valid == []
 
-    invalid = TritonAttentionBackend.validate_configuration(
+    invalid_head_size = TritonAttentionBackend.validate_configuration(
         head_size=64,
         dtype=torch.float16,
         kv_cache_dtype="turboquant_3_2",
@@ -88,9 +88,37 @@ def test_triton_backend_shape_and_validation():
         device_capability=DeviceCapability(8, 0),
         attn_type="decoder",
     )
-    assert "TurboQuant currently requires head_size=128" in invalid
-    assert "TurboQuant currently requires block_size=16" in invalid
-    assert "TurboQuant currently requires sm90/H100" in invalid
+    assert invalid_head_size == ["TurboQuant currently requires head_size=128"]
+
+    invalid_block_size = TritonAttentionBackend.validate_configuration(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="turboquant_3_2",
+        block_size=32,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(9, 0),
+        attn_type="decoder",
+    )
+    assert invalid_block_size == ["TurboQuant currently requires block_size=16"]
+
+    invalid_sm = TritonAttentionBackend.validate_configuration(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="turboquant_3_2",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(8, 0),
+        attn_type="decoder",
+    )
+    assert invalid_sm == ["TurboQuant currently requires sm90/H100"]
 
 
 def test_attention_layer_returns_turboquant_spec():
