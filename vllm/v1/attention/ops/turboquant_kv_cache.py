@@ -166,6 +166,21 @@ def _fwht_pow2(x: torch.Tensor) -> torch.Tensor:
     return out.reshape(orig_shape)
 
 
+def _fwht_pow2_fast(x: torch.Tensor) -> torch.Tensor:
+    """Allocation-light FWHT for small contiguous decode-time tensors."""
+    out = x.contiguous().clone()
+    size = out.shape[-1]
+    block = 1
+    while block < size:
+        view = out.view(*out.shape[:-1], size // (block * 2), block * 2)
+        left = view[..., :block].clone()
+        right = view[..., block : 2 * block].clone()
+        view[..., :block] = left + right
+        view[..., block : 2 * block] = left - right
+        block *= 2
+    return out
+
+
 @cache
 def _structured_signs_cached(
     device_type: str,
@@ -211,6 +226,31 @@ def _apply_block_hadamard(
         outputs.append(block)
         cursor += block_size
     return torch.cat(outputs, dim=-1)
+
+
+def _apply_block_hadamard_token_heads(
+    x: torch.Tensor,
+    signs: torch.Tensor,
+    *,
+    normalized: bool,
+    inverse: bool,
+) -> torch.Tensor:
+    """Fast path for query decode transforms with shape [num_heads, dim]."""
+    out = torch.empty_like(x)
+    cursor = 0
+    for block_size in _hadamard_block_sizes(x.shape[-1]):
+        block = x[:, cursor : cursor + block_size]
+        block_signs = signs[cursor : cursor + block_size]
+        if inverse:
+            block_out = _fwht_pow2_fast(block)
+            block_out = block_out * block_signs
+        else:
+            block_out = _fwht_pow2_fast(block * block_signs)
+        if normalized:
+            block_out = block_out / math.sqrt(block_size)
+        out[:, cursor : cursor + block_size] = block_out
+        cursor += block_size
+    return out
 
 
 def _apply_mse_transform(x: torch.Tensor, signs: torch.Tensor) -> torch.Tensor:
@@ -532,12 +572,22 @@ def apply_turboquant_query_transforms(
             torch.gather(query_token, dim=-1, index=group) for group in gathered_indices
         )
         q_rot = tuple(
-            _apply_mse_transform(group_tensor, rotation).unsqueeze(0)
+            _apply_block_hadamard_token_heads(
+                group_tensor,
+                rotation,
+                normalized=True,
+                inverse=False,
+            ).unsqueeze(0)
             for group_tensor, rotation in zip(gathered_groups, rotations, strict=True)
         )
         q_qjl = tuple(
             (
-                _apply_qjl_transform(group_tensor, qjl_matrix)
+                _apply_block_hadamard_token_heads(
+                    group_tensor,
+                    qjl_matrix,
+                    normalized=False,
+                    inverse=False,
+                )
                 * (TURBOQUANT_QJL_SCALE / group_tensor.shape[-1])
             ).unsqueeze(0)
             for group_tensor, qjl_matrix in zip(
