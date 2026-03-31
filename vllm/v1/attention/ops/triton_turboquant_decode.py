@@ -353,6 +353,11 @@ def _turboquant_decode_q1_fused(
     q_qjl0 = q_qjl_groups[0].contiguous()
     q_rot1 = q_rot_groups[1].contiguous()
     q_qjl1 = q_qjl_groups[1].contiguous()
+    seq_lens = seq_lens.to(device=query.device, dtype=torch.int32, non_blocking=True)
+    block_table = block_table.to(device=query.device, non_blocking=True)
+    kv_head_for_query_head = kv_head_for_query_head.to(
+        device=query.device, dtype=torch.int64, non_blocking=True
+    )
 
     num_tokens, num_heads, head_size = query.shape
     assert head_size == 128
