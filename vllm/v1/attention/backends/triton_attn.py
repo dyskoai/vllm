@@ -720,11 +720,27 @@ class TritonAttentionImpl(AttentionImpl):
             )
 
         if self._is_turboquant():
+            turboquant_query = query[:num_actual_tokens]
+            turboquant_key = key[:num_actual_tokens] if key is not None else None
+            turboquant_value = value[:num_actual_tokens] if value is not None else None
+            turboquant_output = output[:num_actual_tokens]
+            if self._use_turboquant_prefill_fast_path(
+                turboquant_key,
+                turboquant_value,
+                attn_metadata,
+            ):
+                return self._forward_turboquant_prefill(
+                    turboquant_query,
+                    turboquant_key,
+                    turboquant_value,
+                    turboquant_output,
+                    attn_metadata,
+                )
             return self._forward_turboquant(
-                query[:num_actual_tokens],
+                turboquant_query,
                 kv_cache,
                 attn_metadata,
-                output[:num_actual_tokens],
+                turboquant_output,
             )
 
         # For decoder and cross-attention, use KV cache as before
@@ -824,6 +840,56 @@ class TritonAttentionImpl(AttentionImpl):
             logits_soft_cap=self.logits_soft_cap,
             out=output,
         )
+
+    def _use_turboquant_prefill_fast_path(
+        self,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        attn_metadata: TritonAttentionMetadata,
+    ) -> bool:
+        if key is None or value is None:
+            return False
+        if self.attn_type != AttentionType.DECODER:
+            return False
+        if self.logits_soft_cap not in (None, 0):
+            return False
+        if self.sinks is not None:
+            return False
+        if attn_metadata.mm_prefix_range_tensor is not None:
+            return False
+        if attn_metadata.use_cascade:
+            return False
+
+        query_lens = (
+            attn_metadata.query_start_loc_cpu[1:]
+            - attn_metadata.query_start_loc_cpu[:-1]
+        )
+        if query_lens.numel() == 0:
+            return False
+        return bool(torch.equal(query_lens, attn_metadata.seq_lens_cpu))
+
+    def _forward_turboquant_prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: TritonAttentionMetadata,
+    ) -> torch.Tensor:
+        context_attention_fwd(
+            q=query,
+            k=key,
+            v=value,
+            o=output,
+            b_start_loc=attn_metadata.query_start_loc,
+            b_seq_len=attn_metadata.seq_lens,
+            max_input_len=attn_metadata.max_query_len,
+            is_causal=attn_metadata.causal,
+            softmax_scale=self.scale,
+            sliding_window_q=self.sliding_window[0],
+            sliding_window_k=self.sliding_window[1],
+        )
+        return output
 
     def _forward_encoder_attention(
         self,
