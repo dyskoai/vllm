@@ -829,8 +829,6 @@ class TritonAttentionImpl(AttentionImpl):
             token_kv_lens=attn_metadata.turboquant_token_seq_lens,
             token_query_positions=attn_metadata.turboquant_query_positions,
             kv_head_for_query_head=state["kv_head_for_query_head"],
-            key_query_group_indices=state["key_group_indices"],
-            value_query_group_indices=state["value_group_indices"],
             value_mse_inverse_matrices=state["value_mse_inverse"],
             value_qjl_inverse_matrices=state["value_qjl_inverse"],
             causal=attn_metadata.causal,
