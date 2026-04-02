@@ -465,7 +465,7 @@ def _turboquant_decode_q1_fused(
     native_value_cache = value_cache.contiguous()
     native_block_table = block_table.contiguous()
     native_seq_lens = seq_lens.contiguous()
-    native_kv_head_for_query_head = kv_head_for_query_head.contiguous()
+    native_kv_head_for_query_head = kv_head_for_query_head.reshape(-1).contiguous()
 
     used_native = False
     if _native_q1_decode_enabled():
@@ -503,6 +503,17 @@ def _turboquant_decode_q1_fused(
         except RuntimeError:
             used_native = False
             if not _NATIVE_Q1_LOGGED_FALLBACK:
+                logger.error(
+                    "TurboQuant native q1 decode input shapes: q_rot0=%s "
+                    "key_cache=%s value_cache=%s block_table=%s seq_lens=%s "
+                    "kv_head_for_query_head=%s",
+                    tuple(q_rot0.shape),
+                    tuple(native_key_cache.shape),
+                    tuple(native_value_cache.shape),
+                    tuple(native_block_table.shape),
+                    tuple(native_seq_lens.shape),
+                    tuple(native_kv_head_for_query_head.shape),
+                )
                 logger.exception("TurboQuant native q1 decode fallback")
                 _NATIVE_Q1_LOGGED_FALLBACK = True
 
