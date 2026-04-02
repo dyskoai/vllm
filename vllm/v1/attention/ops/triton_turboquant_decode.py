@@ -465,7 +465,9 @@ def _turboquant_decode_q1_fused(
     native_value_cache = value_cache.contiguous()
     native_block_table = block_table.contiguous()
     native_seq_lens = seq_lens.contiguous()
-    native_kv_head_for_query_head = kv_head_for_query_head.reshape(-1).contiguous()
+    native_kv_head_for_query_head = (
+        kv_head_for_query_head.reshape(-1)[:num_heads].contiguous()
+    )
 
     used_native = False
     if _native_q1_decode_enabled():
