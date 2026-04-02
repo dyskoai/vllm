@@ -9,6 +9,7 @@ import os
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.turboquant_kv_cache import (
     TURBOQUANT_QJL_SCALE,
@@ -26,6 +27,10 @@ TURBOQUANT_GROUP0_DIM = 32
 TURBOQUANT_GROUP1_DIM = 96
 TURBOQUANT_GROUP1A_DIM = 64
 TURBOQUANT_GROUP1B_DIM = 32
+
+logger = init_logger(__name__)
+_NATIVE_Q1_LOGGED_ACTIVE = False
+_NATIVE_Q1_LOGGED_FALLBACK = False
 
 
 @cache
@@ -419,6 +424,9 @@ def _turboquant_decode_q1_fused(
     logits_soft_cap: float,
     out: torch.Tensor | None,
 ) -> torch.Tensor:
+    global _NATIVE_Q1_LOGGED_ACTIVE
+    global _NATIVE_Q1_LOGGED_FALLBACK
+
     (q_rot_groups, q_qjl_groups) = apply_turboquant_query_transforms(
         query,
         key_group_indices,
@@ -478,8 +486,20 @@ def _turboquant_decode_q1_fused(
                 logits_soft_cap,
             )
             used_native = True
+            if not _NATIVE_Q1_LOGGED_ACTIVE:
+                logger.info(
+                    "TurboQuant native q1 decode active: num_tokens=%d "
+                    "num_heads=%d max_seq_len=%d",
+                    num_tokens,
+                    num_heads,
+                    int(seq_lens.max().item()) if seq_lens.numel() > 0 else 0,
+                )
+                _NATIVE_Q1_LOGGED_ACTIVE = True
         except RuntimeError:
             used_native = False
+            if not _NATIVE_Q1_LOGGED_FALLBACK:
+                logger.exception("TurboQuant native q1 decode fallback")
+                _NATIVE_Q1_LOGGED_FALLBACK = True
 
     if not used_native:
         grid = (num_tokens, num_heads)
