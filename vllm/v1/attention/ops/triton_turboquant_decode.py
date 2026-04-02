@@ -461,6 +461,11 @@ def _turboquant_decode_q1_fused(
     centroids1 = centroids[1].contiguous()
     qjl_scale0 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP0_DIM
     qjl_scale1 = TURBOQUANT_QJL_SCALE / TURBOQUANT_GROUP1_DIM
+    native_key_cache = key_cache.contiguous()
+    native_value_cache = value_cache.contiguous()
+    native_block_table = block_table.contiguous()
+    native_seq_lens = seq_lens.contiguous()
+    native_kv_head_for_query_head = kv_head_for_query_head.contiguous()
 
     used_native = False
     if _native_q1_decode_enabled():
@@ -474,11 +479,11 @@ def _turboquant_decode_q1_fused(
                 q_qjl0,
                 q_rot1,
                 q_qjl1,
-                key_cache,
-                value_cache,
-                block_table,
-                seq_lens,
-                kv_head_for_query_head,
+                native_key_cache,
+                native_value_cache,
+                native_block_table,
+                native_seq_lens,
+                native_kv_head_for_query_head,
                 centroids2,
                 centroids1,
                 norm_lut,
